@@ -100,7 +100,7 @@ WithSlogLogger(l *slog.Logger)
 ### Provider notes
 
 - **Billplz** (MYR) — `PaymentID` is the Bill ID. `ValidateWebhook` expects the form-urlencoded callback POST.
-- **senangPay** (MYR) — `PaymentID` is your `ReferenceID` (order_id). Payment is queried by order_id. `ValidateWebhook` accepts both the callback POST and the return-URL GET.
+- **senangPay** (MYR) — `PaymentID` is your `ReferenceID` (order_id) everywhere: checkout, `Payment`, and `ValidateWebhook`. senangPay's transaction_id is not exposed. `ValidateWebhook` accepts both the callback POST and the return-URL GET.
 - **iPaymu** (IDR) — `GenerateCheckoutURL` returns the SessionId; `Payment` expects the numeric transactionId sent to your notify URL. Notifications are unsigned, so `ValidateWebhook` re-queries iPaymu to confirm authenticity. iPaymu only accepts whole rupiah, so `Amount` must be a multiple of 100.
 
 ### Amounts and currency

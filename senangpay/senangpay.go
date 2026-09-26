@@ -143,10 +143,9 @@ func (c *Client) Payment(ctx context.Context, id string) (*gadapters.Payment, er
 	}
 
 	var out struct {
-		Status        int         `json:"status"`
-		TransactionID string      `json:"transaction_id"`
-		AmountPaid    json.Number `json:"amount_paid"`
-		Msg           string      `json:"msg"`
+		Status     int         `json:"status"`
+		AmountPaid json.Number `json:"amount_paid"`
+		Msg        string      `json:"msg"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("senangpay: unable to unmarshal response: %w", err)
@@ -154,7 +153,7 @@ func (c *Client) Payment(ctx context.Context, id string) (*gadapters.Payment, er
 
 	amount, _ := out.AmountPaid.Int64() // amount_paid is in cents
 	return &gadapters.Payment{
-		PaymentID: out.TransactionID,
+		PaymentID: id,
 		Paid:      out.Status == 1, // 1 = success
 		State:     out.Msg,
 		Amount:    amount,
@@ -165,6 +164,7 @@ func (c *Client) Payment(ctx context.Context, id string) (*gadapters.Payment, er
 // ValidateWebhook verifies the hash of a senangPay callback (POST form) or
 // return (GET query) request. Both carry the same params. The hash is
 // HMAC-SHA256(secretKey, secretKey+status_id+order_id+transaction_id+msg).
+// It returns the order_id, matching the PaymentID from GenerateCheckoutURL.
 func (c *Client) ValidateWebhook(ctx context.Context, r *http.Request) (string, error) {
 	if err := r.ParseForm(); err != nil {
 		return "", fmt.Errorf("senangpay: %w: %w", gadapters.ErrInvalidWebhook, err)
@@ -192,5 +192,5 @@ func (c *Client) ValidateWebhook(ctx context.Context, r *http.Request) (string, 
 	if !hmac.Equal([]byte(got), []byte(want)) {
 		return "", fmt.Errorf("senangpay: %w", gadapters.ErrInvalidSignature)
 	}
-	return values.Get("transaction_id"), nil
+	return values.Get("order_id"), nil
 }

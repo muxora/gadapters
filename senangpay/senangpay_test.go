@@ -103,8 +103,8 @@ func TestPayment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if p.PaymentID != "tx-99" {
-		t.Errorf("PaymentID = %q, want tx-99", p.PaymentID)
+	if p.PaymentID != "ref-1" {
+		t.Errorf("PaymentID = %q, want ref-1", p.PaymentID)
 	}
 	if !p.Paid || p.State != "Payment was successful" {
 		t.Errorf("got paid=%v state=%q, want true/'Payment was successful'", p.Paid, p.State)
@@ -134,8 +134,8 @@ func TestValidateWebhook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid callback rejected: %v", err)
 	}
-	if id != "tx-99" {
-		t.Errorf("payment id = %q, want tx-99", id)
+	if id != "ref-1" {
+		t.Errorf("payment id = %q, want ref-1", id)
 	}
 
 	get := httptest.NewRequest(http.MethodGet, "/return?"+form.Encode(), nil)
@@ -147,6 +147,56 @@ func TestValidateWebhook(t *testing.T) {
 	tampered := httptest.NewRequest(http.MethodGet, "/return?"+form.Encode(), nil)
 	if _, err := c.ValidateWebhook(context.Background(), tampered); !errors.Is(err, gadapters.ErrInvalidSignature) {
 		t.Fatalf("err = %v, want ErrInvalidSignature", err)
+	}
+}
+
+func TestPaymentIDConsistent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("order_id"); got != "ref-1" {
+			t.Errorf("order_id = %q, want ref-1", got)
+		}
+		_, _ = w.Write([]byte(`{"status":1,"transaction_id":"tx-99","amount_paid":1050,"msg":"ok"}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{MerchantID: "merch-1", SecretKey: "secret"}, WithBaseURL(srv.URL))
+
+	checkout, err := c.GenerateCheckoutURL(context.Background(), &gadapters.CheckoutRequest{
+		ReferenceID: "ref-1",
+		Description: "Order",
+		Amount:      1050,
+		Currency:    "MYR",
+	})
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("status_id", "1")
+	form.Set("order_id", "ref-1")
+	form.Set("transaction_id", "tx-99")
+	form.Set("msg", "ok")
+	mac := hmac.New(sha256.New, []byte("secret"))
+	mac.Write([]byte("secret" + "1" + "ref-1" + "tx-99" + "ok"))
+	form.Set("hash", hex.EncodeToString(mac.Sum(nil)))
+
+	webhookID, err := c.ValidateWebhook(
+		context.Background(),
+		httptest.NewRequest(http.MethodGet, "/return?"+form.Encode(), nil),
+	)
+	if err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+	if webhookID != checkout.PaymentID {
+		t.Fatalf("webhook id = %q, checkout id = %q, want equal", webhookID, checkout.PaymentID)
+	}
+
+	p, err := c.Payment(context.Background(), webhookID)
+	if err != nil {
+		t.Fatalf("payment: %v", err)
+	}
+	if p.PaymentID != checkout.PaymentID {
+		t.Errorf("payment id = %q, checkout id = %q, want equal", p.PaymentID, checkout.PaymentID)
 	}
 }
 
