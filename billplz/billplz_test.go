@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -44,7 +45,7 @@ func TestGenerateCheckoutURL(t *testing.T) {
 			t.Errorf("reference_1 = %q, want ref-1", got)
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"id":"bill-123","url":"https://pay.example/bill-123"}`))
+		_, _ = w.Write([]byte(`{"id":"bill-123","url":"https://pay.example/bill-123"}`))
 	}))
 	defer srv.Close()
 
@@ -55,7 +56,8 @@ func TestGenerateCheckoutURL(t *testing.T) {
 		Name:        "Ali",
 		Email:       "ali@example.com",
 		Description: "Order",
-		Amount:      10.50,
+		Amount:      1050,
+		Currency:    "MYR",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -79,14 +81,29 @@ func TestGenerateCheckoutURLRequiresCallback(t *testing.T) {
 func TestGenerateCheckoutURLNonOK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		w.Write([]byte(`{"error":"bad"}`))
+		_, _ = w.Write([]byte(`{"error":"bad"}`))
 	}))
 	defer srv.Close()
 
 	c := New(Config{CollectionID: "col", SecretKey: "sk", CallbackURL: "https://cb.example/hook"}, WithBaseURL(srv.URL))
 
-	if _, err := c.GenerateCheckoutURL(context.Background(), &gadapters.CheckoutRequest{ReferenceID: "x"}); err == nil {
+	if _, err := c.GenerateCheckoutURL(
+		context.Background(),
+		&gadapters.CheckoutRequest{ReferenceID: "x", Currency: "MYR"},
+	); err == nil {
 		t.Fatal("expected error on non-OK status, got nil")
+	}
+}
+
+func TestGenerateCheckoutURLUnsupportedCurrency(t *testing.T) {
+	c := New(Config{CollectionID: "col", SecretKey: "sk", CallbackURL: "https://cb.example/hook"})
+
+	_, err := c.GenerateCheckoutURL(
+		context.Background(),
+		&gadapters.CheckoutRequest{ReferenceID: "x", Amount: 100, Currency: "IDR"},
+	)
+	if !errors.Is(err, gadapters.ErrUnsupportedCurrency) {
+		t.Fatalf("err = %v, want ErrUnsupportedCurrency", err)
 	}
 }
 
@@ -102,7 +119,9 @@ func TestPayment(t *testing.T) {
 			t.Errorf("Authorization = %q, want %q", got, wantAuth("sk"))
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"id":"bill-123","paid":true,"state":"paid","amount":1050,"url":"https://pay.example/bill-123"}`))
+		_, _ = w.Write(
+			[]byte(`{"id":"bill-123","paid":true,"state":"paid","amount":1050,"url":"https://pay.example/bill-123"}`),
+		)
 	}))
 	defer srv.Close()
 
@@ -115,9 +134,29 @@ func TestPayment(t *testing.T) {
 	if !p.Paid || p.State != "paid" {
 		t.Errorf("got paid=%v state=%q, want true/paid", p.Paid, p.State)
 	}
-	if p.Amount != 10.50 {
-		t.Errorf("Amount = %v, want 10.50", p.Amount)
+	if p.Amount != 1050 || p.Currency != "MYR" {
+		t.Errorf("got amount=%d currency=%q, want 1050/MYR", p.Amount, p.Currency)
 	}
+}
+
+func TestPaymentNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"type":"RecordNotFound"}}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{SecretKey: "sk"}, WithBaseURL(srv.URL))
+
+	if _, err := c.Payment(context.Background(), "missing"); !errors.Is(err, gadapters.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func formRequest(form url.Values) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return r
 }
 
 func TestValidateWebhook(t *testing.T) {
@@ -144,7 +183,7 @@ func TestValidateWebhook(t *testing.T) {
 	mac.Write([]byte(strings.Join(parts, "|")))
 	form.Set("x_signature", hex.EncodeToString(mac.Sum(nil)))
 
-	id, err := c.ValidateWebhook(context.Background(), []byte(form.Encode()))
+	id, err := c.ValidateWebhook(context.Background(), formRequest(form))
 	if err != nil {
 		t.Fatalf("valid signature rejected: %v", err)
 	}
@@ -153,7 +192,35 @@ func TestValidateWebhook(t *testing.T) {
 	}
 
 	form.Set("amount", "9999")
-	if _, err := c.ValidateWebhook(context.Background(), []byte(form.Encode())); err == nil {
-		t.Fatal("expected error on tampered payload, got nil")
+	if _, err := c.ValidateWebhook(
+		context.Background(),
+		formRequest(form),
+	); !errors.Is(
+		err,
+		gadapters.ErrInvalidSignature,
+	) {
+		t.Fatalf("tampered payload: err = %v, want ErrInvalidSignature", err)
+	}
+
+	form.Del("x_signature")
+	if _, err := c.ValidateWebhook(
+		context.Background(),
+		formRequest(form),
+	); !errors.Is(
+		err,
+		gadapters.ErrInvalidSignature,
+	) {
+		t.Fatalf("missing signature: err = %v, want ErrInvalidSignature", err)
+	}
+}
+
+func TestMetadata(t *testing.T) {
+	c := New(Config{})
+
+	if got := c.Name(context.Background()); got != "billplz" {
+		t.Errorf("Name = %q, want billplz", got)
+	}
+	if got := c.Country(context.Background()); got != "MYS" {
+		t.Errorf("Country = %q, want MYS", got)
 	}
 }

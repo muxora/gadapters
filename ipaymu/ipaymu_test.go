@@ -6,10 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/muxora/gadapters"
@@ -43,9 +45,14 @@ func TestGenerateCheckoutURL(t *testing.T) {
 		if payload["referenceId"] != "ref-1" {
 			t.Errorf("referenceId = %v, want ref-1", payload["referenceId"])
 		}
+		if price, _ := payload["price"].([]any); len(price) != 1 || price[0] != "25000" {
+			t.Errorf("price = %v, want [25000]", payload["price"])
+		}
 
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"Status":200,"Data":{"SessionID":"sess-9","Url":"https://pay.ipaymu/sess-9"},"Message":"ok"}`))
+		_, _ = w.Write(
+			[]byte(`{"Status":200,"Data":{"SessionID":"sess-9","Url":"https://pay.ipaymu/sess-9"},"Message":"ok"}`),
+		)
 	}))
 	defer srv.Close()
 
@@ -54,7 +61,8 @@ func TestGenerateCheckoutURL(t *testing.T) {
 	res, err := c.GenerateCheckoutURL(context.Background(), &gadapters.CheckoutRequest{
 		ReferenceID: "ref-1",
 		Description: "Order",
-		Amount:      25,
+		Amount:      2500000,
+		Currency:    "IDR",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -70,14 +78,36 @@ func TestGenerateCheckoutURL(t *testing.T) {
 func TestGenerateCheckoutURLNonOK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"Message":"bad"}`))
+		_, _ = w.Write([]byte(`{"Message":"bad"}`))
 	}))
 	defer srv.Close()
 
 	c := New(Config{VA: "va-1", APIKey: "key-1"}, WithBaseURL(srv.URL))
 
-	if _, err := c.GenerateCheckoutURL(context.Background(), &gadapters.CheckoutRequest{ReferenceID: "x"}); err == nil {
+	if _, err := c.GenerateCheckoutURL(
+		context.Background(),
+		&gadapters.CheckoutRequest{ReferenceID: "x", Currency: "IDR"},
+	); err == nil {
 		t.Fatal("expected error on non-OK status, got nil")
+	}
+}
+
+func TestGenerateCheckoutURLInvalidAmount(t *testing.T) {
+	c := New(Config{VA: "va-1", APIKey: "key-1"})
+
+	_, err := c.GenerateCheckoutURL(
+		context.Background(),
+		&gadapters.CheckoutRequest{ReferenceID: "x", Amount: 100, Currency: "MYR"},
+	)
+	if !errors.Is(err, gadapters.ErrUnsupportedCurrency) {
+		t.Fatalf("err = %v, want ErrUnsupportedCurrency", err)
+	}
+
+	if _, err := c.GenerateCheckoutURL(
+		context.Background(),
+		&gadapters.CheckoutRequest{ReferenceID: "x", Amount: 150, Currency: "IDR"},
+	); err == nil {
+		t.Fatal("expected error for fractional rupiah, got nil")
 	}
 }
 
@@ -112,7 +142,11 @@ func TestPayment(t *testing.T) {
 			t.Errorf("transactionId = %v, want 4719", payload["transactionId"])
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"Status":200,"Success":true,"Data":{"TransactionId":4719,"Amount":10000,"Status":1,"StatusDesc":"Berhasil","PaidStatus":"paid"}}`))
+		_, _ = w.Write(
+			[]byte(
+				`{"Status":200,"Success":true,"Data":{"TransactionId":4719,"Amount":10000,"Status":1,"StatusDesc":"Berhasil","PaidStatus":"paid"}}`,
+			),
+		)
 	}))
 	defer srv.Close()
 
@@ -128,8 +162,8 @@ func TestPayment(t *testing.T) {
 	if !p.Paid || p.State != "Berhasil" {
 		t.Errorf("got paid=%v state=%q, want true/Berhasil", p.Paid, p.State)
 	}
-	if p.Amount != 10000 {
-		t.Errorf("Amount = %v, want 10000", p.Amount)
+	if p.Amount != 1000000 || p.Currency != "IDR" {
+		t.Errorf("got amount=%d currency=%q, want 1000000/IDR", p.Amount, p.Currency)
 	}
 }
 
@@ -149,14 +183,16 @@ func TestValidateWebhook(t *testing.T) {
 			t.Errorf("transactionId = %v, want 4719", payload["transactionId"])
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"Status":200,"Data":{"TransactionId":4719,"Status":1,"StatusDesc":"Berhasil"}}`))
+		_, _ = w.Write([]byte(`{"Status":200,"Data":{"TransactionId":4719,"Status":1,"StatusDesc":"Berhasil"}}`))
 	}))
 	defer srv.Close()
 
 	c := New(Config{VA: "va-1", APIKey: "key-1"}, WithBaseURL(srv.URL))
 
 	notify := url.Values{"trx_id": {"4719"}, "status": {"berhasil"}}
-	id, err := c.ValidateWebhook(context.Background(), []byte(notify.Encode()))
+	req := httptest.NewRequest(http.MethodPost, "/notify", strings.NewReader(notify.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	id, err := c.ValidateWebhook(context.Background(), req)
 	if err != nil {
 		t.Fatalf("valid webhook rejected: %v", err)
 	}
@@ -167,7 +203,20 @@ func TestValidateWebhook(t *testing.T) {
 		t.Errorf("re-query hits = %d, want 1", hits)
 	}
 
-	if _, err := c.ValidateWebhook(context.Background(), []byte("status=berhasil")); err == nil {
-		t.Fatal("expected error when trx_id missing, got nil")
+	missing := httptest.NewRequest(http.MethodPost, "/notify", strings.NewReader("status=berhasil"))
+	missing.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if _, err := c.ValidateWebhook(context.Background(), missing); !errors.Is(err, gadapters.ErrInvalidWebhook) {
+		t.Fatalf("err = %v, want ErrInvalidWebhook", err)
+	}
+}
+
+func TestMetadata(t *testing.T) {
+	c := New(Config{})
+
+	if got := c.Name(context.Background()); got != "ipaymu" {
+		t.Errorf("Name = %q, want ipaymu", got)
+	}
+	if got := c.Country(context.Background()); got != "IDN" {
+		t.Errorf("Country = %q, want IDN", got)
 	}
 }

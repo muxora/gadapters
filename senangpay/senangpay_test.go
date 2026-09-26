@@ -6,9 +6,11 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/muxora/gadapters"
@@ -22,7 +24,8 @@ func TestGenerateCheckoutURL(t *testing.T) {
 		Name:        "Ali",
 		Email:       "ali@example.com",
 		Description: "Order",
-		Amount:      10.5,
+		Amount:      1050,
+		Currency:    "MYR",
 	}
 
 	res, err := c.GenerateCheckoutURL(context.Background(), req)
@@ -57,6 +60,18 @@ func TestGenerateCheckoutURL(t *testing.T) {
 	}
 }
 
+func TestGenerateCheckoutURLUnsupportedCurrency(t *testing.T) {
+	c := New(Config{MerchantID: "merch-1", SecretKey: "secret"})
+
+	_, err := c.GenerateCheckoutURL(
+		context.Background(),
+		&gadapters.CheckoutRequest{ReferenceID: "x", Amount: 100, Currency: "IDR"},
+	)
+	if !errors.Is(err, gadapters.ErrUnsupportedCurrency) {
+		t.Fatalf("err = %v, want ErrUnsupportedCurrency", err)
+	}
+}
+
 func TestPayment(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/apiv1/query_order_status" {
@@ -74,7 +89,11 @@ func TestPayment(t *testing.T) {
 			t.Errorf("hash = %q, want %q", q.Get("hash"), want)
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":1,"transaction_id":"tx-99","order_id":"ref-1","amount_paid":1050,"msg":"Payment was successful"}`))
+		_, _ = w.Write(
+			[]byte(
+				`{"status":1,"transaction_id":"tx-99","order_id":"ref-1","amount_paid":1050,"msg":"Payment was successful"}`,
+			),
+		)
 	}))
 	defer srv.Close()
 
@@ -90,8 +109,8 @@ func TestPayment(t *testing.T) {
 	if !p.Paid || p.State != "Payment was successful" {
 		t.Errorf("got paid=%v state=%q, want true/'Payment was successful'", p.Paid, p.State)
 	}
-	if p.Amount != 10.50 {
-		t.Errorf("Amount = %v, want 10.50", p.Amount)
+	if p.Amount != 1050 || p.Currency != "MYR" {
+		t.Errorf("got amount=%d currency=%q, want 1050/MYR", p.Amount, p.Currency)
 	}
 }
 
@@ -109,16 +128,35 @@ func TestValidateWebhook(t *testing.T) {
 	mac.Write([]byte(source))
 	form.Set("hash", hex.EncodeToString(mac.Sum(nil)))
 
-	id, err := c.ValidateWebhook(context.Background(), []byte(form.Encode()))
+	post := httptest.NewRequest(http.MethodPost, "/callback", strings.NewReader(form.Encode()))
+	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	id, err := c.ValidateWebhook(context.Background(), post)
 	if err != nil {
-		t.Fatalf("valid hash rejected: %v", err)
+		t.Fatalf("valid callback rejected: %v", err)
 	}
 	if id != "tx-99" {
 		t.Errorf("payment id = %q, want tx-99", id)
 	}
 
+	get := httptest.NewRequest(http.MethodGet, "/return?"+form.Encode(), nil)
+	if _, err := c.ValidateWebhook(context.Background(), get); err != nil {
+		t.Fatalf("valid return request rejected: %v", err)
+	}
+
 	form.Set("msg", "tampered")
-	if _, err := c.ValidateWebhook(context.Background(), []byte(form.Encode())); err == nil {
-		t.Fatal("expected error on tampered payload, got nil")
+	tampered := httptest.NewRequest(http.MethodGet, "/return?"+form.Encode(), nil)
+	if _, err := c.ValidateWebhook(context.Background(), tampered); !errors.Is(err, gadapters.ErrInvalidSignature) {
+		t.Fatalf("err = %v, want ErrInvalidSignature", err)
+	}
+}
+
+func TestMetadata(t *testing.T) {
+	c := New(Config{})
+
+	if got := c.Name(context.Background()); got != "senangpay" {
+		t.Errorf("Name = %q, want senangpay", got)
+	}
+	if got := c.Country(context.Background()); got != "MYS" {
+		t.Errorf("Country = %q, want MYS", got)
 	}
 }

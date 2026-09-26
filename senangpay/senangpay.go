@@ -19,6 +19,8 @@ import (
 
 var _ gadapters.Provider = (*Client)(nil)
 
+const currency = "MYR"
+
 type Config struct {
 	MerchantID string
 	SecretKey  string
@@ -65,15 +67,30 @@ func New(conf Config, opts ...Option) *Client {
 	return c
 }
 
+func (c *Client) Name(ctx context.Context) string {
+	return "senangpay"
+}
+
+func (c *Client) Country(ctx context.Context) gadapters.Country {
+	return gadapters.CountryMalaysia
+}
+
 // GenerateCheckoutURL builds the senangPay redirect URL for the payment request.
 // The hash is HMAC-SHA256(secretKey, detail+amount+order_id) keyed by secretKey.
-func (c *Client) GenerateCheckoutURL(ctx context.Context, req *gadapters.CheckoutRequest) (*gadapters.CheckoutResponse, error) {
+func (c *Client) GenerateCheckoutURL(
+	ctx context.Context,
+	req *gadapters.CheckoutRequest,
+) (*gadapters.CheckoutResponse, error) {
+	if req.Currency != currency {
+		return nil, fmt.Errorf("senangpay: %w: %q", gadapters.ErrUnsupportedCurrency, req.Currency)
+	}
+
 	u, err := url.Parse(c.baseURL + "/payment/" + c.conf.MerchantID)
 	if err != nil {
 		return nil, fmt.Errorf("senangpay: unable to parse url: %w", err)
 	}
 
-	amount := fmt.Sprintf("%.2f", req.Amount)
+	amount := fmt.Sprintf("%d.%02d", req.Amount/100, req.Amount%100)
 	toHash := c.conf.SecretKey + req.Description + amount + req.ReferenceID
 	mac := hmac.New(sha256.New, []byte(c.conf.SecretKey))
 	mac.Write([]byte(toHash))
@@ -115,7 +132,7 @@ func (c *Client) Payment(ctx context.Context, id string) (*gadapters.Payment, er
 	if err != nil {
 		return nil, fmt.Errorf("senangpay: unable to send request: %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -135,36 +152,45 @@ func (c *Client) Payment(ctx context.Context, id string) (*gadapters.Payment, er
 		return nil, fmt.Errorf("senangpay: unable to unmarshal response: %w", err)
 	}
 
-	amount, _ := out.AmountPaid.Float64()
+	amount, _ := out.AmountPaid.Int64() // amount_paid is in cents
 	return &gadapters.Payment{
 		PaymentID: out.TransactionID,
 		Paid:      out.Status == 1, // 1 = success
 		State:     out.Msg,
-		Amount:    amount / 100, // amount_paid is in cents
+		Amount:    amount,
+		Currency:  currency,
 	}, nil
 }
 
-// ValidateWebhook verifies the hash of a senangPay callback/return body.
-// The callback sends the same params as the return URL. The hash is
+// ValidateWebhook verifies the hash of a senangPay callback (POST form) or
+// return (GET query) request. Both carry the same params. The hash is
 // HMAC-SHA256(secretKey, secretKey+status_id+order_id+transaction_id+msg).
-func (c *Client) ValidateWebhook(ctx context.Context, payload []byte) (string, error) {
-	values, err := url.ParseQuery(string(payload))
-	if err != nil {
-		return "", fmt.Errorf("senangpay: unable to parse webhook payload: %w", err)
+func (c *Client) ValidateWebhook(ctx context.Context, r *http.Request) (string, error) {
+	if err := r.ParseForm(); err != nil {
+		return "", fmt.Errorf("senangpay: %w: %w", gadapters.ErrInvalidWebhook, err)
 	}
+	values := r.Form
 
 	got := values.Get("hash")
 	if got == "" {
-		return "", fmt.Errorf("senangpay: missing hash")
+		return "", fmt.Errorf("senangpay: %w: missing hash", gadapters.ErrInvalidSignature)
 	}
 
-	source := c.conf.SecretKey + values.Get("status_id") + values.Get("order_id") + values.Get("transaction_id") + values.Get("msg")
+	source := c.conf.SecretKey + values.Get(
+		"status_id",
+	) + values.Get(
+		"order_id",
+	) + values.Get(
+		"transaction_id",
+	) + values.Get(
+		"msg",
+	)
 	mac := hmac.New(sha256.New, []byte(c.conf.SecretKey))
 	mac.Write([]byte(source))
 	want := hex.EncodeToString(mac.Sum(nil))
 
 	if !hmac.Equal([]byte(got), []byte(want)) {
-		return "", fmt.Errorf("senangpay: invalid hash")
+		return "", fmt.Errorf("senangpay: %w", gadapters.ErrInvalidSignature)
 	}
 	return values.Get("transaction_id"), nil
 }

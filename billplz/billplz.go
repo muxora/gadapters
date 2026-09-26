@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -22,6 +21,8 @@ import (
 )
 
 var _ gadapters.Provider = (*Client)(nil)
+
+const currency = "MYR"
 
 type Config struct {
 	CollectionID string
@@ -76,11 +77,25 @@ func New(conf Config, opts ...Option) *Client {
 	return c
 }
 
+func (c *Client) Name(ctx context.Context) string {
+	return "billplz"
+}
+
+func (c *Client) Country(ctx context.Context) gadapters.Country {
+	return gadapters.CountryMalaysia
+}
+
 // GenerateCheckoutURL creates a Billplz Bill and returns its payment URL.
 // See https://support.billplz.com/api#v3-bills-create-a-bill.
-func (c *Client) GenerateCheckoutURL(ctx context.Context, req *gadapters.CheckoutRequest) (*gadapters.CheckoutResponse, error) {
+func (c *Client) GenerateCheckoutURL(
+	ctx context.Context,
+	req *gadapters.CheckoutRequest,
+) (*gadapters.CheckoutResponse, error) {
 	if c.conf.CallbackURL == "" {
 		return nil, fmt.Errorf("billplz: callback URL is required")
+	}
+	if req.Currency != currency {
+		return nil, fmt.Errorf("billplz: %w: %q", gadapters.ErrUnsupportedCurrency, req.Currency)
 	}
 
 	vals := url.Values{}
@@ -89,7 +104,7 @@ func (c *Client) GenerateCheckoutURL(ctx context.Context, req *gadapters.Checkou
 	vals.Set("email", req.Email)
 	vals.Set("name", req.Name)
 	// Billplz expects the amount in cents (MYR only).
-	vals.Set("amount", strconv.Itoa(int(math.Round(req.Amount*100))))
+	vals.Set("amount", strconv.FormatInt(req.Amount, 10))
 	vals.Set("callback_url", c.conf.CallbackURL)
 	vals.Set("reference_1_label", "payment_id")
 	vals.Set("reference_1", req.ReferenceID)
@@ -110,7 +125,7 @@ func (c *Client) GenerateCheckoutURL(ctx context.Context, req *gadapters.Checkou
 	if err != nil {
 		return nil, fmt.Errorf("billplz: unable to send request: %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -145,11 +160,14 @@ func (c *Client) Payment(ctx context.Context, id string) (*gadapters.Payment, er
 	if err != nil {
 		return nil, fmt.Errorf("billplz: unable to send request: %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
 		return nil, fmt.Errorf("billplz: unable to read response: %w", err)
+	}
+	if res.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("billplz: %w: %s", gadapters.ErrNotFound, id)
 	}
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("billplz: status is not OK: %v", string(data))
@@ -170,23 +188,24 @@ func (c *Client) Payment(ctx context.Context, id string) (*gadapters.Payment, er
 		PaymentID:  out.ID,
 		Paid:       out.Paid,
 		State:      out.State,
-		Amount:     float64(out.Amount) / 100,
+		Amount:     out.Amount,
+		Currency:   currency,
 		PaymentURL: out.URL,
 	}, nil
 }
 
-// ValidateWebhook verifies the X Signature of a Billplz callback body.
-// See https://support.billplz.com/api#x-signature. The payload is the raw
-// form-urlencoded callback body.
-func (c *Client) ValidateWebhook(ctx context.Context, payload []byte) (string, error) {
-	values, err := url.ParseQuery(string(payload))
-	if err != nil {
-		return "", fmt.Errorf("billplz: unable to parse webhook payload: %w", err)
+// ValidateWebhook verifies the X Signature of a Billplz callback request.
+// See https://support.billplz.com/api#x-signature. The request is the
+// form-urlencoded POST Billplz sends to the callback URL.
+func (c *Client) ValidateWebhook(ctx context.Context, r *http.Request) (string, error) {
+	if err := r.ParseForm(); err != nil {
+		return "", fmt.Errorf("billplz: %w: %w", gadapters.ErrInvalidWebhook, err)
 	}
+	values := r.PostForm
 
 	got := values.Get("x_signature")
 	if got == "" {
-		return "", fmt.Errorf("billplz: missing x_signature")
+		return "", fmt.Errorf("billplz: %w: missing x_signature", gadapters.ErrInvalidSignature)
 	}
 
 	parts := make([]string, 0, len(values))
@@ -202,7 +221,7 @@ func (c *Client) ValidateWebhook(ctx context.Context, payload []byte) (string, e
 	want := hex.EncodeToString(mac.Sum(nil))
 
 	if !hmac.Equal([]byte(got), []byte(want)) {
-		return "", fmt.Errorf("billplz: invalid x_signature")
+		return "", fmt.Errorf("billplz: %w", gadapters.ErrInvalidSignature)
 	}
 	return values.Get("id"), nil
 }

@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
-	"net/url"
 	"strconv"
 	"time"
 
@@ -19,6 +19,8 @@ import (
 )
 
 var _ gadapters.Provider = (*Client)(nil)
+
+const currency = "IDR"
 
 type Config struct {
 	VA     string
@@ -66,14 +68,35 @@ func New(conf Config, opts ...Option) *Client {
 	return c
 }
 
+func (c *Client) Name(ctx context.Context) string {
+	return "ipaymu"
+}
+
+func (c *Client) Country(ctx context.Context) gadapters.Country {
+	return gadapters.CountryIndonesia
+}
+
 // GenerateCheckoutURL creates an iPaymu redirect payment and returns its URL.
 // The returned PaymentID is the iPaymu SessionId; the numeric transactionId
 // used by Payment only exists after the payer completes (sent to the notify URL).
-func (c *Client) GenerateCheckoutURL(ctx context.Context, req *gadapters.CheckoutRequest) (*gadapters.CheckoutResponse, error) {
+//
+// iPaymu only accepts whole rupiah, so Amount (in IDR minor units) must be a
+// multiple of 100.
+func (c *Client) GenerateCheckoutURL(
+	ctx context.Context,
+	req *gadapters.CheckoutRequest,
+) (*gadapters.CheckoutResponse, error) {
+	if req.Currency != currency {
+		return nil, fmt.Errorf("ipaymu: %w: %q", gadapters.ErrUnsupportedCurrency, req.Currency)
+	}
+	if req.Amount%100 != 0 {
+		return nil, fmt.Errorf("ipaymu: amount %d is not a whole rupiah", req.Amount)
+	}
+
 	payload := map[string]any{
 		"product":     []string{req.Description},
 		"qty":         []string{"1"},
-		"price":       []string{strconv.Itoa(int(req.Amount))},
+		"price":       []string{strconv.FormatInt(req.Amount/100, 10)},
 		"description": []string{req.Description},
 		"referenceId": req.ReferenceID,
 		"lang":        "en",
@@ -117,12 +140,13 @@ func (c *Client) Payment(ctx context.Context, id string) (*gadapters.Payment, er
 		return nil, fmt.Errorf("ipaymu: unable to unmarshal response: %w", err)
 	}
 
-	amount, _ := out.Data.Amount.Float64()
+	rupiah, _ := out.Data.Amount.Float64()
 	return &gadapters.Payment{
 		PaymentID: strconv.FormatInt(out.Data.TransactionID, 10),
 		Paid:      out.Data.Status == 1, // 1 = Success
 		State:     out.Data.StatusDesc,
-		Amount:    amount,
+		Amount:    int64(math.Round(rupiah * 100)),
+		Currency:  currency,
 	}, nil
 }
 
@@ -140,7 +164,13 @@ func (c *Client) post(ctx context.Context, path string, payload any) ([]byte, er
 	}
 
 	bodyHash := sha256.Sum256(body)
-	stringToSign := fmt.Sprintf("%s:%s:%s:%s", http.MethodPost, c.conf.VA, hex.EncodeToString(bodyHash[:]), c.conf.APIKey)
+	stringToSign := fmt.Sprintf(
+		"%s:%s:%s:%s",
+		http.MethodPost,
+		c.conf.VA,
+		hex.EncodeToString(bodyHash[:]),
+		c.conf.APIKey,
+	)
 	mac := hmac.New(sha256.New, []byte(c.conf.APIKey))
 	mac.Write([]byte(stringToSign))
 
@@ -153,7 +183,7 @@ func (c *Client) post(ctx context.Context, path string, payload any) ([]byte, er
 	if err != nil {
 		return nil, fmt.Errorf("ipaymu: unable to send request: %w", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -168,15 +198,14 @@ func (c *Client) post(ctx context.Context, path string, payload any) ([]byte, er
 // ValidateWebhook verifies an iPaymu notification. iPaymu notifications are
 // unsigned, so authenticity is confirmed server-to-server by re-querying the
 // transaction with the configured VA/API key.
-func (c *Client) ValidateWebhook(ctx context.Context, payload []byte) (string, error) {
-	values, err := url.ParseQuery(string(payload))
-	if err != nil {
-		return "", fmt.Errorf("ipaymu: unable to parse webhook payload: %w", err)
+func (c *Client) ValidateWebhook(ctx context.Context, r *http.Request) (string, error) {
+	if err := r.ParseForm(); err != nil {
+		return "", fmt.Errorf("ipaymu: %w: %w", gadapters.ErrInvalidWebhook, err)
 	}
 
-	trxID := values.Get("trx_id")
+	trxID := r.Form.Get("trx_id")
 	if trxID == "" {
-		return "", fmt.Errorf("ipaymu: missing trx_id")
+		return "", fmt.Errorf("ipaymu: %w: missing trx_id", gadapters.ErrInvalidWebhook)
 	}
 
 	if _, err := c.Payment(ctx, trxID); err != nil {
