@@ -127,7 +127,8 @@ Implement `gadapters.Provider` in a new sub-package:
 
 ```go
 type Provider interface {
-	Name(ctx context.Context) string     // e.g. "billplz", matches the package name
+	ID(ctx context.Context) string       // e.g. "billplz", matches the package name
+	Name(ctx context.Context) string     // display name, e.g. "Billplz"
 	Country(ctx context.Context) Country // ISO 3166-1 alpha-3, e.g. "MYS"
 	GenerateCheckoutURL(ctx context.Context, req *CheckoutRequest) (*CheckoutResponse, error)
 	Payment(ctx context.Context, id string) (*Payment, error)

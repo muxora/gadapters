@@ -49,7 +49,12 @@ type Payment struct {
 }
 
 type Provider interface {
-	// Name returns the gateway's name (e.g. "billplz").
+	// ID returns the gateway's stable identifier (e.g. "billplz"), matching
+	// the package name. Use it for lookups, storage and routing.
+	ID(ctx context.Context) string
+
+	// Name returns the gateway's human-readable name for presentation
+	// (e.g. "Billplz").
 	Name(ctx context.Context) string
 
 	// Country returns the ISO 3166-1 alpha-3 code of the country the gateway

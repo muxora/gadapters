@@ -203,8 +203,11 @@ func TestPaymentIDConsistent(t *testing.T) {
 func TestMetadata(t *testing.T) {
 	c := New(Config{})
 
-	if got := c.Name(context.Background()); got != "senangpay" {
-		t.Errorf("Name = %q, want senangpay", got)
+	if got := c.ID(context.Background()); got != "senangpay" {
+		t.Errorf("ID = %q, want senangpay", got)
+	}
+	if got := c.Name(context.Background()); got != "senangPay" {
+		t.Errorf("Name = %q, want senangPay", got)
 	}
 	if got := c.Country(context.Background()); got != "MYS" {
 		t.Errorf("Country = %q, want MYS", got)

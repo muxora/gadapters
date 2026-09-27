@@ -213,8 +213,11 @@ func TestValidateWebhook(t *testing.T) {
 func TestMetadata(t *testing.T) {
 	c := New(Config{})
 
-	if got := c.Name(context.Background()); got != "ipaymu" {
-		t.Errorf("Name = %q, want ipaymu", got)
+	if got := c.ID(context.Background()); got != "ipaymu" {
+		t.Errorf("ID = %q, want ipaymu", got)
+	}
+	if got := c.Name(context.Background()); got != "iPaymu" {
+		t.Errorf("Name = %q, want iPaymu", got)
 	}
 	if got := c.Country(context.Background()); got != "IDN" {
 		t.Errorf("Country = %q, want IDN", got)

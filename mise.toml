@@ -10,3 +10,7 @@ run = "go test -race -v ./..."
 description = "Run linter"
 run = "golangci-lint run ./..."
 
+[tasks.precommit]
+description = "Run lint and tests"
+depends = ["lint", "test"]
+

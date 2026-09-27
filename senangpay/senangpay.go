@@ -67,8 +67,12 @@ func New(conf Config, opts ...Option) *Client {
 	return c
 }
 
-func (c *Client) Name(ctx context.Context) string {
+func (c *Client) ID(ctx context.Context) string {
 	return "senangpay"
+}
+
+func (c *Client) Name(ctx context.Context) string {
+	return "senangPay"
 }
 
 func (c *Client) Country(ctx context.Context) gadapters.Country {
