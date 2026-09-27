@@ -4,6 +4,8 @@ package gadapters
 type Country string
 
 const (
-	CountryIndonesia Country = "IDN"
-	CountryMalaysia  Country = "MYS"
+	CountryIndonesia   Country = "IDN"
+	CountryMalaysia    Country = "MYS"
+	CountryPhilippines Country = "PHL"
+	CountrySingapore   Country = "SGP"
 )

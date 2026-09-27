@@ -14,11 +14,14 @@ Payment gateway adapters for Go. One small interface, many Southeast Asian provi
 
 ## Supported providers
 
-| Provider  | Package                                   | Region    | Webhook verification                    |
-|-----------|-------------------------------------------|-----------|-----------------------------------------|
-| Billplz   | `github.com/muxora/gadapters/billplz`     | Malaysia  | X Signature (HMAC-SHA256)               |
-| senangPay | `github.com/muxora/gadapters/senangpay`   | Malaysia  | Hash (HMAC-SHA256)                      |
-| iPaymu    | `github.com/muxora/gadapters/ipaymu`      | Indonesia | Server-to-server re-query (unsigned)    |
+| Provider  | Package                                 | Region      | Webhook verification                 |
+|-----------|-----------------------------------------|-------------|--------------------------------------|
+| Billplz   | `github.com/muxora/gadapters/billplz`   | Malaysia    | X Signature (HMAC-SHA256)            |
+| senangPay | `github.com/muxora/gadapters/senangpay` | Malaysia    | Hash (HMAC-SHA256)                   |
+| iPaymu    | `github.com/muxora/gadapters/ipaymu`    | Indonesia   | Server-to-server re-query (unsigned) |
+| HitPay    | `github.com/muxora/gadapters/hitpay`    | Singapore   | Hitpay-Signature (HMAC-SHA256)       |
+| toyyibPay | `github.com/muxora/gadapters/toyyibpay` | Malaysia    | Hash (MD5)                           |
+| PayMongo  | `github.com/muxora/gadapters/paymongo`  | Philippines | Paymongo-Signature (HMAC-SHA256)     |
 
 ## Installation
 
@@ -86,6 +89,9 @@ func main() {
 billplz.New(billplz.Config{CollectionID, SecretKey, XSignatureKey, CallbackURL, RedirectURL})
 senangpay.New(senangpay.Config{MerchantID, SecretKey})
 ipaymu.New(ipaymu.Config{VA, APIKey})
+hitpay.New(hitpay.Config{APIKey, Salt, RedirectURL})
+toyyibpay.New(toyyibpay.Config{UserSecretKey, CategoryCode, CallbackURL, ReturnURL})
+paymongo.New(paymongo.Config{SecretKey, WebhookSecret, PaymentMethodTypes, SuccessURL, CancelURL})
 ```
 
 All constructors accept the same options:
@@ -102,6 +108,9 @@ WithSlogLogger(l *slog.Logger)
 - **Billplz** (MYR) — `PaymentID` is the Bill ID. `ValidateWebhook` expects the form-urlencoded callback POST.
 - **senangPay** (MYR) — `PaymentID` is your `ReferenceID` (order_id) everywhere: checkout, `Payment`, and `ValidateWebhook`. senangPay's transaction_id is not exposed. `ValidateWebhook` accepts both the callback POST and the return-URL GET.
 - **iPaymu** (IDR) — `GenerateCheckoutURL` returns the SessionId; `Payment` expects the numeric transactionId sent to your notify URL. Notifications are unsigned, so `ValidateWebhook` re-queries iPaymu to confirm authenticity. iPaymu only accepts whole rupiah, so `Amount` must be a multiple of 100.
+- **HitPay** (SGD) — `PaymentID` is the payment request ID. Register your webhook URL in the dashboard (Developers > Webhook Endpoints) and subscribe to `payment_request.completed`. `ValidateWebhook` checks the JSON body against your salt and rejects events that aren't `payment_request`. For sandbox, use `WithBaseURL("https://api.sandbox.hit-pay.com")`.
+- **toyyibPay** (MYR) — `PaymentID` is the bill code. Bills are FPX-only, fixed-amount and at least MYR 1.00. `Description` becomes the bill name (trimmed to 30 characters) and description (trimmed to 100); characters other than letters, digits, spaces and `_` are removed. The callback hash doesn't cover `billcode`, so confirm with `Payment` before fulfilling. For sandbox, use `WithBaseURL("https://dev.toyyibpay.com")`.
+- **PayMongo** (PHP) — `PaymentID` is the Checkout Session ID (`cs_...`). `PaymentMethodTypes` is required (e.g. `qrph`, `gcash`, `paymaya`, `card`). Register your webhook in the dashboard (Settings > Webhooks) and subscribe to `checkout_session.payment.paid`. `ValidateWebhook` rejects events for other resources with `ErrInvalidWebhook`; respond 200 to those so PayMongo doesn't retry. There's no separate sandbox URL: use an `sk_test_` key.
 
 ### Amounts and currency
 
